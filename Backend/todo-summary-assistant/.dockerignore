@@ -1,0 +1,15 @@
+target/
+.git
+.gitignore
+.idea/
+.vscode/
+.mvn/
+mvnw
+mvnw.cmd
+HELP.md
+*.md
+*.log
+.env
+.env.*
+Dockerfile
+.dockerignore
