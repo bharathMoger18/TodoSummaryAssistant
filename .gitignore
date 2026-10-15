@@ -1,0 +1,28 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Keys and certificates
+*.pem
+*.key
+
+# Build output and dependencies
+target/
+build/
+node_modules/
+
+# Logs
+*.log
+
+# Terraform state (in case I use IaC later)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# Editors and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
