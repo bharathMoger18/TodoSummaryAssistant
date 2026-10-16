@@ -1,7 +1,7 @@
 import axios from 'axios';
 
-//Springboot backend url
-const API_BASE_URL = 'http://localhost:8080/api/todos'; 
+// Relative URL: nginx (or the dev proxy in package.json) forwards /api to the Spring Boot backend
+const API_BASE_URL = '/api/todos';
 
 const todoService = {
   getAllTodos: () => axios.get(API_BASE_URL),
