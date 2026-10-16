@@ -22,3 +22,7 @@ ENV BACKEND_HOST=todo-backend \
     DNS_RESOLVER=127.0.0.11
 
 EXPOSE 8080
+
+# Healthy when nginx answers its own /healthz endpoint
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8080/healthz | grep -q ok || exit 1
