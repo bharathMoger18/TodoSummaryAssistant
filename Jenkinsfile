@@ -116,7 +116,7 @@ pipeline {
                         set -euo pipefail
                         curl -fsS --retry 5 --retry-delay 5 --retry-connrefused "http://${APP_HOST}/healthz"
                         curl -fsS "http://${APP_HOST}/api/todos" > /dev/null
-                        RUNNING="$(ssh -o StrictHostKeyChecking=accept-new ubuntu@${APP_HOST} cat ~/todo/.current_tag)"
+                        RUNNING="$(ssh -o StrictHostKeyChecking=accept-new ubuntu@${APP_HOST} 'cat ~/todo/.current_tag')"
                         echo "running tag: $RUNNING, expected: $IMAGE_TAG"
                         [ "$RUNNING" = "$IMAGE_TAG" ]
                     '''
