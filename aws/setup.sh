@@ -26,3 +26,4 @@ allow_from_group() {
 
 allow_from_group 8080   # backend /actuator/prometheus
 allow_from_group 9100   # node exporter
+allow_from_group 8081   # cadvisor
