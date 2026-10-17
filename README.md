@@ -91,18 +91,36 @@ Both services have a `.dockerignore`. All configuration comes from environment v
 
 ## 4. CI/CD pipeline (`Jenkinsfile`)
 
-Jenkins runs on the `todo-ops` EC2 instance as a multibranch pipeline. The Prepare, test and build stages run on every branch. Push, deploy and verify run only on `main`.
+Jenkins runs on the `todo-ops` EC2 instance as a multibranch pipeline. Every commit gets built and tested, but only commits on `main` are pushed and deployed. Other branches stop after the image build, so I can try things without touching the running app.
 
-| Stage | What it does |
-|---|---|
-| Prepare | Tags the build with the 8-character commit SHA, checks `APP_HOST` is set, and reads the AWS account ID. |
-| Backend tests | Starts a throwaway MySQL 8.4 container with a random password, runs `mvn test` against it, then removes it. The only test in the project is a Spring context test. There are no frontend tests, so none run. |
-| Build images | Builds the backend and frontend images tagged `<ECR>/todo-backend:<sha>` and `todo-frontend:<sha>`. |
-| Push to ECR | Logs in with the instance role and pushes both images. Skips a push if the tag already exists, because tags are immutable. |
-| Deploy to EC2 | Copies `docker-compose.prod.yml` and `aws/deploy.sh` to the app host over SSH and runs `deploy.sh <tag>`. The script reads secrets from SSM, starts the stack, waits for health, and rolls back to the previous tag if the new one is not healthy. |
-| Verify deployment | Calls `/healthz` and `/api/todos` through port 80 and checks that the running tag equals the built tag. |
+Here is what each stage does and why it is there.
 
-Other behavior: the pipeline stops at the first failing stage, one build runs at a time, there is a 45-minute timeout, and only the last 10 builds are kept. Secrets are never in the repo. The SSH key is a Jenkins credential (`app-ssh`), and AWS access comes from the instance role.
+**1. Prepare**
+The image tag is the first 8 characters of the commit hash, so any running container can be traced back to an exact commit. The stage stops the build right away if `APP_HOST` is not set in Jenkins, which is better than finding out halfway through a deploy. It also asks AWS which account it is running in and builds the ECR address from that, so no account number is written in the repo.
+
+**2. Backend tests**
+Jenkins starts a throwaway MySQL 8.4 container on its own Docker network, with a random password made for that run only, and waits up to about two minutes for it to accept connections. Then it runs `mvn test` in a Maven container against that database. The Cohere key and Slack URL are dummy values here because the tests never call those services. A cleanup step removes the container and network even if the tests fail. The only test the project has is a Spring context test, which starts the whole app and connects to MySQL. It is a smoke test, not full coverage. There are no frontend tests, so none run.
+
+**3. Build images**
+Builds the backend and frontend images from their Dockerfiles, both tagged with the commit hash. `--pull` makes sure the base images are fresh instead of whatever was cached. The backend build skips tests because the previous stage already ran them. If either build fails, nothing gets pushed.
+
+**4. Push to ECR** (`main` only)
+Logs in to ECR with a short-lived token from the instance role. The Docker login config goes in a temporary folder that is deleted afterwards, so the token does not stay on disk. Before pushing, the stage checks whether that tag already exists in ECR. Tags are immutable, so if the commit was built before it skips the push instead of failing.
+
+**5. Deploy to EC2** (`main` only)
+Jenkins connects to the app host over SSH using a key stored in Jenkins credentials. It copies `docker-compose.prod.yml` and `aws/deploy.sh` to the host every time, so the server always runs the versions in the repo, then runs `deploy.sh <tag>`. That script logs in to ECR, reads the database details and API keys from SSM Parameter Store, pulls the new images and starts them with Docker Compose. It then waits up to 200 seconds for both containers to be healthy and for `/api/todos` to answer through nginx. If that works, it records the tag in `.current_tag`. If it does not, it prints the last backend log lines, starts the previous tag again and exits with an error, so the build ends red.
+
+**6. Verify deployment** (`main` only)
+This check runs from Jenkins, not from the app host, and goes through port 80 like a real user. It calls `/healthz` (retrying a few times), calls `/api/todos`, then reads `.current_tag` from the host and compares it with the tag that was just built. If the host is running a different version, the build fails.
+
+**After the build (always)**
+Removes the images from the Jenkins machine and prunes unused ones, so the disk does not fill up over many builds.
+
+**Failing fast and safety settings**
+The shell steps use `set -e` and `pipefail`, so any failing command stops its stage and the later stages never run. Only one build can run at a time, so two deploys cannot overlap. A build is cancelled after 45 minutes, and Jenkins keeps the last 10 builds.
+
+**Secrets**
+No secrets are in the Jenkinsfile or the repo. The SSH key is a Jenkins credential, AWS access comes from the instance role, and the database password and API keys come from SSM when the deploy runs.
 
 **Trigger:** Jenkins checks the repository every minute and builds new commits automatically. It polls because its port is open only to my IP, so GitHub webhooks cannot reach it.
 
