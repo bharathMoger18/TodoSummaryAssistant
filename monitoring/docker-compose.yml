@@ -1,0 +1,53 @@
+# Monitoring stack for the ops box. Prometheus is bound to localhost (reach it with an SSH tunnel).
+# Grafana listens on 3000; the security group limits it to my IP.
+name: todo-monitoring
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - ./targets:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    logging: *default-logging
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    restart: unless-stopped
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    logging: *default-logging
+
+volumes:
+  prometheus-data:
+  grafana-data:
