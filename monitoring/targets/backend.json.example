@@ -1,0 +1,6 @@
+[
+  {
+    "targets": ["APP_PRIVATE_IP:8080"],
+    "labels": { "host": "app" }
+  }
+]

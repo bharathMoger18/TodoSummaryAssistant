@@ -1,0 +1,10 @@
+[
+  {
+    "targets": ["node-exporter:9100"],
+    "labels": { "host": "ops" }
+  },
+  {
+    "targets": ["APP_PRIVATE_IP:9100"],
+    "labels": { "host": "app" }
+  }
+]

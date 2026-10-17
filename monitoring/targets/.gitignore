@@ -1,0 +1,2 @@
+# Real target files hold private IPs; only the .example files are committed
+*.json
