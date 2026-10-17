@@ -155,3 +155,7 @@ Written up in `FAILURE_AND_ROLLBACK.md`. I tested the automatic rollback by depl
 ## Cleaning up
 
 When the review is finished, stop or delete both EC2 instances and the RDS instance to avoid charges.
+
+## Status
+
+The AWS resources (EC2, RDS, ECR, IAM, SSM) were deleted after submission to avoid charges. The deployment is described in `aws/aws-setup.md` and can be recreated on request. The application still runs locally with `docker compose up --build`.
