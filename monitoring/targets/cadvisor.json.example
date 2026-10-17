@@ -1,0 +1,10 @@
+[
+  {
+    "targets": ["cadvisor:8080"],
+    "labels": { "host": "ops" }
+  },
+  {
+    "targets": ["APP_PRIVATE_IP:8081"],
+    "labels": { "host": "app" }
+  }
+]
