@@ -50,7 +50,7 @@ pipeline {
                         exit 1
                     fi
                     mkdir -p "$STATE_DIR"
-                    jq -n --arg op "$OPERATOR_CIDR" --arg key "$STATE_DIR/todo-key.pem" --arg v "$GRAFANA_VIEWER_CIDRS" \
+                    jq -n --arg op "$OPERATOR_CIDR" --arg key "$STATE_DIR/todo-key.pem" --arg v "${GRAFANA_VIEWER_CIDRS:-}" \
                         '{operator_cidr: $op, ssh_key_path: $key, grafana_viewer_cidrs: ($v | gsub(" "; "") | split(",") | map(select(length > 0)))}' \
                         > "$STATE_DIR/pipeline.tfvars.json"
                 '''
