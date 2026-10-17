@@ -11,7 +11,6 @@ pipeline {
     environment {
         AWS_REGION         = 'ap-south-1'
         AWS_DEFAULT_REGION = 'ap-south-1'
-        APP_HOST           = '10.0.2.184'   // private IP of the app host, not a secret
     }
 
     stages {
@@ -19,6 +18,9 @@ pipeline {
             steps {
                 script {
                     env.IMAGE_TAG = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
+                    if (!env.APP_HOST?.trim()) {
+                        error('APP_HOST is not set (Manage Jenkins > System > Global properties > Environment variables)')
+                    }
                     def account = sh(script: 'aws sts get-caller-identity --query Account --output text', returnStdout: true).trim()
                     env.ECR_REGISTRY = "${account}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
                 }
@@ -68,8 +70,8 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    docker build -t "${ECR_REGISTRY}/todo-backend:${IMAGE_TAG}" Backend/todo-summary-assistant
-                    docker build -t "${ECR_REGISTRY}/todo-frontend:${IMAGE_TAG}" Frontend/todo
+                    docker build --pull -t "${ECR_REGISTRY}/todo-backend:${IMAGE_TAG}" Backend/todo-summary-assistant
+                    docker build --pull -t "${ECR_REGISTRY}/todo-frontend:${IMAGE_TAG}" Frontend/todo
                 '''
             }
         }

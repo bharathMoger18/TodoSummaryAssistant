@@ -11,7 +11,7 @@ COPY src ./src
 RUN npm run build
 
 # ---------- Stage 2: nginx serves the static files (non-root) ----------
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.30-alpine
 
 # The image fills in this template from environment variables at startup
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
