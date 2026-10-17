@@ -1,126 +1,139 @@
-# Todo Summary Assistant
+# Todo Summary Assistant: DevOps Assessment
 
-A full-stack application to manage personal to-do items, summarize pending tasks using Cohere LLM, and send the summary to a Slack channel.
+A to-do application (Spring Boot backend, React frontend, MySQL) that can summarize pending tasks with Cohere and post the summary to Slack. This repository is the original project plus my DevOps work: Docker, a Jenkins CI/CD pipeline, deployment to AWS EC2 with RDS, and Prometheus/Grafana monitoring.
 
-## Table of Contents
+The application features are unchanged. Everything below is about building, running, deploying and operating it.
 
-* [Features](#features)
-* [Tech Stack](#tech-stack)
-* [Setup Instructions](#setup-instructions)
-    * [Prerequisites](#prerequisites)
-    * [Backend Setup](#backend-setup)
-    * [Frontend Setup](#frontend-setup)
-* [LLM (Cohere) Setup](#llm-cohere-setup)
-* [Slack Integration Setup](#slack-integration-setup)
-* [Design/Architecture Decisions](#designarchitecture-decisions)
+## Documents
 
+| File | What it covers |
+|---|---|
+| `aws/aws-setup.md`, `aws/architecture-diagram.png` | AWS layout, security groups, IAM, secrets |
+| `FAILURE_AND_ROLLBACK.md` | The six failure scenarios, with what I tested |
+| `MONITORING_AND_OPERATIONS.md` | Metrics, logs, alerts, early detection |
+| `Jenkinsfile` | The pipeline |
+| `monitoring/` | `prometheus.yml`, `alert-rules.yml`, Grafana dashboard and provisioning |
 
-## Features
+## Repository layout
 
-* **Create, Edit, Delete To-Do Items:** Full CRUD operations for personal to-do items.
-* **View To-Do List:** Display current to-do items with their status.
-* **Summarize Pending To-Dos:** Utilizes Cohere LLM to generate a concise summary of all pending to-do items.
-* **Send Summary to Slack:** Automatically posts the generated summary to a configured Slack channel using Incoming Webhooks.
-* **Notifications:** Provides success/failure messages for Slack operations.
+```
+Backend/todo-summary-assistant/   Spring Boot + Maven app, Dockerfile, .dockerignore
+Frontend/todo/                    React app, Dockerfile, .dockerignore, nginx.conf.template
+Jenkinsfile                       CI/CD pipeline
+docker-compose.yml                local run: MySQL + backend + frontend
+docker-compose.prod.yml           production stack on EC2 (no MySQL, RDS is used)
+aws/                              deploy.sh, setup.sh, aws-setup.md, architecture diagram
+monitoring/                       Prometheus, alert rules, Grafana, compose file for the ops host
+.env.example                      environment variables
+```
 
-## Tech Stack
+I used a `Jenkinsfile` in the repo root instead of `.github/workflows/ci-cd.yml`. `docker-compose.prod.yml`, `monitoring/docker-compose.yml` and `aws/deploy.sh` are extra files beyond the suggested layout.
 
-* **Frontend:** HTML, CSS, Javascript, React, Axios(for API calls), 
-* **Backend:** Spring Boot (Java 17+), Maven
-* **Database:** MySQL (via Spring Data JPA and Hibernate)
-* **LLM:** Cohere API
-* **Messaging:** Slack Incoming Webhooks
-* **HTTP Client:** OkHttp (for Cohere and Slack API calls in backend)
+## 1. Run locally
 
-## Setup Instructions
+**Requirements:** Docker with Compose v2. Nothing else is needed, because the images build the app themselves.
 
-### Prerequisites
+```bash
+cp .env.example .env
+# edit .env: set DB_PASSWORD to any password you like
+docker compose up --build
+```
 
-* Java Development Kit (JDK) 17 or higher
-* Node.js and npm (or yarn)
-* MySQL Server running locally or accessible remotely
-* A Cohere API Key
-* A Slack Workspace and an Incoming Webhook URL
+Open http://localhost:3000. The first start takes a few minutes while images build. MySQL runs in a container with a named volume, the backend creates the `todo` table on startup (`ddl-auto=update`), and the frontend container proxies `/api` to the backend.
 
-### Backend Setup
+`COHERE_API_KEY` and `SLACK_WEBHOOK_URL` default to dummy values for local runs. Creating, editing, completing and deleting to-dos works without them. The "summarize and send to Slack" feature needs real values, and **I did not use real ones: the keys in my deployment are placeholders**, so I did not test that feature end to end.
 
-1.  **Clone the repository:**
-    ```bash
-    git clone [https://github.com/your-username/todo-summary-assistant.git](https://github.com/your-username/todo-summary-assistant.git)
-    cd todo-summary-assistant/backend
-    ```
-2.  **Configure `application.properties`:**
-    Open `src/main/resources/application.properties` and update the following:
-    ```properties
-    spring.datasource.url=jdbc:mysql://localhost:3306/todo_db?createDatabaseIfNotExist=true
-    spring.datasource.username=root
-    spring.datasource.password=your_mysql_password_here # <-- IMPORTANT: Replace with your MySQL root password
-    cohere.api.key=YOUR_COHERE_API_KEY # <-- IMPORTANT: Replace with your Cohere API Key
-    slack.webhook.url=YOUR_SLACK_WEBHOOK_URL # <-- IMPORTANT: Replace with your Slack Incoming Webhook URL
-    ```
-3.  **Build and Run:**
-    ```bash
-    mvn clean install
-    mvn spring-boot:run
-    ```
-    The backend will start on `http://localhost:8080`.
+### Environment variables
 
-### Frontend Setup
+| Variable | Used by | Purpose |
+|---|---|---|
+| `DB_PASSWORD` | local compose | MySQL root password (required locally) |
+| `DB_NAME` | local compose | Database name, default `todo_db` |
+| `COHERE_API_KEY` | backend | Cohere API key |
+| `SLACK_WEBHOOK_URL` | backend | Slack incoming webhook |
+| `FRONTEND_PORT` | local compose | Host port for the UI, default 3000 |
+| `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | backend | JDBC settings. In production the compose file builds them from the values below. |
+| `BACKEND_HOST`, `BACKEND_PORT`, `DNS_RESOLVER` | frontend (nginx) | Where nginx proxies `/api` |
+| `DB_HOST`, `DB_USERNAME`, `DB_PASSWORD` | production compose | RDS endpoint and credentials, filled from SSM by `deploy.sh` |
+| `ECR_REGISTRY`, `IMAGE_TAG`, `METRICS_BIND_IP` | production compose | Registry, image tag, and the host's private IP for the metrics ports |
 
-1.  **Navigate to the frontend directory:**
-    ```bash
-    cd ../frontend
-    ```
-2.  **Install dependencies:**
-    ```bash
-    npm install
-    # or yarn install
-    ```
-3.  **Run the React application:**
-    ```bash
-    npm start
-    # or yarn start
-    ```
-    The frontend will open in your browser at `http://localhost:3000`.
+### Assumptions
 
-## LLM (Cohere) Setup
+- MySQL 8.x is the database, matching RDS MySQL 8.4.
+- The backend listens on 8080 inside its container and is not published on the host locally. The frontend is the only entry point.
+- The existing CORS setting in `application.properties` is unchanged.
 
-1.  **Create a Cohere Account:** Visit [Cohere.ai](https://cohere.ai/) and sign up for a free account.
-2.  **Obtain API Key:** Once logged in, navigate to your dashboard or API keys section to find your API key.
-3.  **Update `application.properties`:** Paste your Cohere API key into `cohere.api.key` in the backend's `application.properties` file.
+## 2. Changes to application code (DevOps enablement only)
 
-## Slack Integration Setup
+No business logic was changed. The changes are:
 
-1.  **Create a Slack App:**
-    * Go to [api.slack.com/apps](https://api.slack.com/apps).
-    * Click "Create New App" and choose "From scratch".
-    * Give your app a name (e.g., "Todo Summary Bot") and select your Slack workspace.
-2.  **Activate Incoming Webhooks:**
-    * From your app's settings page, navigate to "Features" -> "Incoming Webhooks".
-    * Toggle the "Activate Incoming Webhooks" switch to "On".
-    * Scroll down and click the "Add New Webhook to Workspace" button.
-    * Select the specific channel where you want the to-do summaries to be posted (e.g., `#general`, `#todos`, or a new channel).
-    * Click "Allow".
-3.  **Copy Webhook URL:**
-    * A unique Webhook URL will be generated. Copy this URL.
-4.  **Update `application.properties`:** Paste this URL into `slack.webhook.url` in the backend's `application.properties` file.
+- `Backend/.../application.properties`: database URL, username and password, the Cohere key and the Slack webhook now come from environment variables, so no real values are committed. Actuator now exposes only `health` and `prometheus`, with an `application` tag on metrics.
+- `Backend/.../pom.xml`: added `spring-boot-starter-actuator` and `micrometer-registry-prometheus`, which provide the health endpoint and the Prometheus metrics endpoint.
+- `Frontend/todo/src/services/todoService.js` and `Frontend/todo/package.json`: `todoService.js` now uses the relative URL `/api/todos` instead of `http://localhost:8080/api/todos`, so nginx forwards `/api` to the backend. `package.json` got a `"proxy": "http://localhost:8080"` entry for running `npm start` in development.
 
-## Design/Architecture Decisions
+## 3. Docker design
 
-* **Separation of Concerns:** The project is cleanly separated into frontend (React) and backend (Spring Boot) directories, allowing independent development and deployment.
-* **RESTful API:** The backend exposes standard RESTful endpoints for managing todos, ensuring clear and predictable communication with the frontend.
-* **Spring Data JPA:** Leveraged for efficient and simplified database interactions with MySQL, reducing boilerplate code for data access.
-* **Service Layer:** Business logic (CRUD operations, LLM calls, Slack calls) is encapsulated within dedicated service classes, promoting modularity and testability.
-* **External API Integration:** `OkHttp` was chosen as a lightweight and efficient HTTP client for making external API calls to Cohere and Slack.
-* **CORS Configuration:** Explicit CORS configuration in Spring Boot ensures that the React frontend can communicate with the backend.
-* **Error Handling:** Basic error handling is implemented on both frontend and backend to provide user feedback and log issues.
-* **LLM Prompt Engineering:** A simple prompt is used for Cohere to instruct it on summarizing the list of to-do items. This can be further refined for better results.
-* **Notification System:** A simple notification component in React provides immediate feedback to the user about operations.
+**Backend** (`Backend/todo-summary-assistant/Dockerfile`)
+- Multi-stage: `maven:3.9.9-eclipse-temurin-17` builds the jar, then only the jar is copied into `eclipse-temurin:17-jre-alpine`, which keeps the final image small.
+- `pom.xml` is copied and dependencies are downloaded before the source is copied, so dependency layers are cached between builds.
+- Runs as a non-root user (`app`).
+- `HEALTHCHECK` calls `/actuator/health`. Compose and the deploy script use it.
+- `-XX:MaxRAMPercentage=75.0` makes the JVM respect the container's memory limit.
+- Installs the patched `zlib` package in the runtime stage.
 
-## Demo Images
+**Frontend** (`Frontend/todo/Dockerfile`)
+- Multi-stage: `node:20-alpine` runs `npm ci` and `npm run build`, then the static files are served by `nginxinc/nginx-unprivileged:1.30-alpine`.
+- The nginx image is the unprivileged variant, so it runs as non-root and listens on 8080.
+- `nginx.conf.template` proxies `/api` to `BACKEND_HOST:BACKEND_PORT` and serves `/healthz`, so the same image works locally and on EC2 without a rebuild.
+- `HEALTHCHECK` calls `/healthz`.
 
-![Screenshot (1146)](https://github.com/user-attachments/assets/53fe53e3-b527-4659-9ab6-b462ae034fbd)
+Both services have a `.dockerignore`. All configuration comes from environment variables, and no secrets are baked into images.
 
-![Screenshot (1144)](https://github.com/user-attachments/assets/474b1a46-36c8-4407-8bf9-a46ca911603b)
+## 4. CI/CD pipeline (`Jenkinsfile`)
 
-![Screenshot (1143)](https://github.com/user-attachments/assets/1e9f8783-d0df-42ce-a3f8-ec7ca5e7c078)
+Jenkins runs on the `todo-ops` EC2 instance as a multibranch pipeline. The Prepare, test and build stages run on every branch. Push, deploy and verify run only on `main`.
+
+| Stage | What it does |
+|---|---|
+| Prepare | Tags the build with the 8-character commit SHA, checks `APP_HOST` is set, and reads the AWS account ID. |
+| Backend tests | Starts a throwaway MySQL 8.4 container with a random password, runs `mvn test` against it, then removes it. The only test in the project is a Spring context test. There are no frontend tests, so none run. |
+| Build images | Builds the backend and frontend images tagged `<ECR>/todo-backend:<sha>` and `todo-frontend:<sha>`. |
+| Push to ECR | Logs in with the instance role and pushes both images. Skips a push if the tag already exists, because tags are immutable. |
+| Deploy to EC2 | Copies `docker-compose.prod.yml` and `aws/deploy.sh` to the app host over SSH and runs `deploy.sh <tag>`. The script reads secrets from SSM, starts the stack, waits for health, and rolls back to the previous tag if the new one is not healthy. |
+| Verify deployment | Calls `/healthz` and `/api/todos` through port 80 and checks that the running tag equals the built tag. |
+
+Other behavior: the pipeline stops at the first failing stage, one build runs at a time, there is a 45-minute timeout, and only the last 10 builds are kept. Secrets are never in the repo. The SSH key is a Jenkins credential (`app-ssh`), and AWS access comes from the instance role.
+
+**Trigger:** Jenkins checks the repository every minute and builds new commits automatically. It polls because its port is open only to my IP, so GitHub webhooks cannot reach it.
+
+**Jenkins setup needed to reproduce:** Jenkins with Docker, the AWS CLI, Git and Java on a host that has an ECR push role; credentials `app-ssh` (SSH key for the app host) and `github-read`; and a global environment variable `APP_HOST` with the app host's address.
+
+## 5. AWS deployment
+
+See `aws/aws-setup.md` and `aws/architecture-diagram.png`. Short version: `todo-app` (EC2 t3.small) runs the app containers, `todo-ops` (EC2 t3.medium) runs Jenkins, Prometheus and Grafana, and `todo-db` is an RDS MySQL instance that accepts connections only from the app security group. Instance roles are used instead of access keys, and database credentials and API keys are in SSM Parameter Store under `/todo/*`.
+
+## 6. Monitoring
+
+Prometheus and Grafana run in containers on `todo-ops`. To start them, copy each `monitoring/targets/*.json.example` file to a file without `.example` and fill in the app host's private IP, then run `docker compose -f monitoring/docker-compose.yml up -d`. The datasource and dashboard are provisioned from `monitoring/grafana/`. `monitoring/grafana-dashboard.json` is a copy of the dashboard for review.
+
+Four alert rules are in `monitoring/alert-rules.yml`: service down, high 5xx rate, high CPU and low disk. Details are in `MONITORING_AND_OPERATIONS.md`.
+
+## 7. Failure and rollback
+
+Written up in `FAILURE_AND_ROLLBACK.md`. I tested the automatic rollback by deploying a deliberately broken version: the health check failed, the previous version was restored, and the build ended red. The whole site was down for about 5 minutes 45 seconds during that test.
+
+## Known limitations
+
+- **Grafana has no notification channel.** Alerts fire but nobody is notified.
+- **Cohere key and Slack webhook are placeholders**, so the summary feature was not tested with real services.
+- **HTTP only.** There is no TLS on the app, Grafana or Jenkins.
+- **RDS is single-AZ** with 3-day backups and no deletion protection, to keep cost low.
+- **The infrastructure was created by hand** (console and CLI). `aws/setup.sh` only contains the monitoring security-group rules, and there is no Terraform.
+- **Not done:** root access key check and deactivation, and a monthly budget alert.
+- **The existing React dependencies report 106 vulnerabilities** (4 critical) in `npm ci`. I did not change the application's dependencies.
+- Jenkins logs `Could not update commit status` (403) because my GitHub token cannot write commit statuses. The builds are not affected.
+- The deploy script waits its full 200 seconds before rolling back, even if Compose has already marked the backend unhealthy. Rollback could start about 3 minutes earlier.
+
+## Cleaning up
+
+When the review is finished, stop or delete both EC2 instances and the RDS instance to avoid charges.
