@@ -34,3 +34,30 @@ services:
         condition: service_healthy
     restart: unless-stopped
     logging: *default-logging
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    command:
+      - --path.rootfs=/host
+    pid: host
+    ports:
+      - "${METRICS_BIND_IP:?METRICS_BIND_IP is required}:9100:9100"
+    volumes:
+      - /:/host:ro,rslave
+    restart: unless-stopped
+    logging: *default-logging
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+    ports:
+      - "${METRICS_BIND_IP:?METRICS_BIND_IP is required}:8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+    logging: *default-logging
