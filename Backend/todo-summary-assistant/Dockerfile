@@ -15,6 +15,8 @@ FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 
 # Run as a non-root user
+# Patch zlib (CVE-2026-85091) until the base image ships the fix
+RUN apk upgrade --no-cache zlib
 RUN addgroup -S app && adduser -S app -G app
 
 COPY --from=build /app/target/*.jar app.jar
