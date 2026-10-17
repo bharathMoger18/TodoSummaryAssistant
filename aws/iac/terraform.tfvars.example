@@ -1,0 +1,2 @@
+# Copy to terraform.tfvars (git-ignored) and set your own public IP.
+operator_cidr = "203.0.113.4/32"
