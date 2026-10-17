@@ -26,3 +26,4 @@ node_modules/
 .vscode/
 *.iml
 .DS_Store
+.env.jenkins

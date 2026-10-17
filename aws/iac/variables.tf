@@ -38,3 +38,14 @@ variable "ssh_key_path" {
   default     = "todo-key.pem"
   description = "Where the generated SSH private key is written. It is never committed."
 }
+
+variable "grafana_viewer_cidrs" {
+  type        = list(string)
+  default     = []
+  description = "Extra IPs allowed to open Grafana, for example a reviewer. The operator address is always allowed."
+
+  validation {
+    condition     = alltrue([for c in var.grafana_viewer_cidrs : can(cidrhost(c, 0)) && c != "0.0.0.0/0"])
+    error_message = "Each entry must be a valid CIDR such as 203.0.113.4/32, and 0.0.0.0/0 is not allowed."
+  }
+}

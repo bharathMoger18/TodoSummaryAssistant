@@ -1,0 +1,31 @@
+jenkins:
+  systemMessage: "Todo Summary Assistant: this Jenkins builds the whole AWS environment. Run it on your own machine only."
+  numExecutors: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+unclassified:
+  location:
+    url: "http://localhost:8080/"
+jobs:
+  - script: >
+      pipelineJob('todo-iac') {
+        description('Creates the AWS environment with Terraform, then builds, deploys and starts monitoring. Run it again with ACTION=destroy to delete everything.')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url('${REPO_URL:-https://github.com/bharathMoger18/TodoSummaryAssistant.git}') }
+                branch('*/${REPO_BRANCH:-main}')
+              }
+            }
+            scriptPath('Jenkinsfile.iac')
+          }
+        }
+      }

@@ -155,6 +155,16 @@ resource "aws_vpc_security_group_ingress_rule" "ops_grafana" {
   to_port           = 3000
 }
 
+# Optional extra viewers (for example a reviewer). Never 0.0.0.0/0, see the variable validation.
+resource "aws_vpc_security_group_ingress_rule" "ops_grafana_viewers" {
+  for_each          = toset([for c in var.grafana_viewer_cidrs : c if c != var.operator_cidr])
+  security_group_id = aws_security_group.ops.id
+  cidr_ipv4         = each.value
+  ip_protocol       = "tcp"
+  from_port         = 3000
+  to_port           = 3000
+}
+
 # RDS: MySQL only, and only from the app security group.
 resource "aws_vpc_security_group_ingress_rule" "rds_from_app" {
   security_group_id            = aws_security_group.rds.id

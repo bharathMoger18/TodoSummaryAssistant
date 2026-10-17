@@ -1,0 +1,25 @@
+# Jenkins for running the AWS pipeline from your own machine.
+#   cp .env.jenkins.example .env.jenkins   (then fill it in)
+#   docker compose -f docker-compose.jenkins.yml up -d --build
+# Open http://localhost:8080 and log in as admin.
+name: todo-jenkins
+
+services:
+  jenkins:
+    build: ./jenkins
+    user: root
+    env_file: .env.jenkins
+    ports:
+      # localhost only: nobody else on your network can reach this Jenkins
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      # The pipeline builds images with your machine's Docker. This socket gives Jenkins
+      # root-level control of it, so use a machine you are comfortable with.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+volumes:
+  # Holds the Terraform state and SSH key. Do NOT run "down -v" while AWS resources exist:
+  # Terraform would forget them and they would keep costing money.
+  jenkins_home:
