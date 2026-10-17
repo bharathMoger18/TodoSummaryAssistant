@@ -150,7 +150,11 @@ pipeline {
                     trap 'rm -rf "$DOCKER_CONFIG"' EXIT
                     aws ecr get-login-password | docker login --username AWS --password-stdin "$REG"
                     for repo in todo-backend todo-frontend; do
-                        docker push "$REG/$repo:$IMAGE_TAG"
+                        if aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$IMAGE_TAG" > /dev/null 2>&1; then
+                            echo "$repo:$IMAGE_TAG is already in ECR (tags are immutable), skipping push"
+                        else
+                            docker push "$REG/$repo:$IMAGE_TAG"
+                        fi
                     done
                 '''
             }
