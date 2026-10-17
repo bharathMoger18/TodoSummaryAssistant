@@ -29,6 +29,11 @@ COHERE_API_KEY="$(ssm cohere-api-key)"
 SLACK_WEBHOOK_URL="$(ssm slack-webhook-url)"
 export DB_HOST DB_USERNAME DB_PASSWORD COHERE_API_KEY SLACK_WEBHOOK_URL
 
+# Private IP of this host (IMDSv2). The backend port is published on it only, so the VPC can reach it but the internet cannot
+IMDS_TOKEN="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')"
+METRICS_BIND_IP="$(curl -fsS -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" http://169.254.169.254/latest/meta-data/local-ipv4)"
+export METRICS_BIND_IP
+
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY" > /dev/null
 
