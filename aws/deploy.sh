@@ -58,7 +58,7 @@ echo "Deploying tag $TAG (previous: ${PREV:-none})"
 
 export IMAGE_TAG="$TAG"
 $COMPOSE pull
-$COMPOSE up -d --remove-orphans
+$COMPOSE up -d --remove-orphans || echo "compose up reported a problem, checking health" >&2
 
 if wait_healthy; then
   echo "$TAG" > .current_tag
@@ -73,7 +73,7 @@ $COMPOSE logs --tail 40 backend >&2 || true
 if [ -n "$PREV" ]; then
   echo "Rolling back to $PREV" >&2
   export IMAGE_TAG="$PREV"
-  $COMPOSE up -d
+  $COMPOSE up -d || true
   if wait_healthy; then
     echo "Rollback OK: $PREV is running again" >&2
   else
