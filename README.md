@@ -155,7 +155,7 @@ cd TodoSummaryAssistant
 
 - Docker with Compose v2, and Git.
 - An AWS account and an IAM user that can create EC2, VPC, RDS, ECR, IAM roles and SSM parameters. I ran it with an administrator user and did not work out a smaller set of permissions.
-- About 25 minutes, and a small AWS bill (roughly ₹10 to ₹15 per hour (10 to 15 US cents) while it runs, so check your own pricing).
+- About 25 minutes, and a small AWS bill (roughly ₹10 to ₹15 per hour, or 10 to 15 US cents, while it runs, so check your own pricing).
 
 ### Steps
 
