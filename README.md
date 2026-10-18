@@ -155,7 +155,7 @@ cd TodoSummaryAssistant
 
 - Docker with Compose v2, and Git.
 - An AWS account and an IAM user that can create EC2, VPC, RDS, ECR, IAM roles and SSM parameters. I ran it with an administrator user and did not work out a smaller set of permissions.
-- About 25 minutes, and a small AWS bill (roughly 10 to 15 US cents per hour while it runs, so check your own pricing).
+- About 25 minutes, and a small AWS bill (roughly ₹10 to ₹15 per hour (10 to 15 US cents) while it runs, so check your own pricing).
 
 ### Steps
 
@@ -205,7 +205,7 @@ Grafana is only reachable from your own public IP, which the pipeline detects au
 - **Jenkins reads the pipeline from GitHub, not from your local folder.** If you change files, push them to your own fork and set `REPO_URL` and `REPO_BRANCH` in `.env.jenkins`.
 - **Jenkins controls your Docker through its socket**, which gives it root-level access to your machine's Docker. Run it on a machine you are comfortable with.
 - **Port 80 of the app is open to the internet while it runs.** SSH and Grafana are limited to your IP.
-- **Always run `destroy` when you are done.** Left running, the environment costs a few dollars a day.
+- **Always run `destroy` when you are done.** Left running, the environment costs a few hundred rupees a day (a few US dollars).
 - **Do not run `docker compose ... down -v`** or delete the `todo-jenkins_jenkins_home` volume while AWS resources exist. That volume holds the Terraform state, and without it Terraform forgets what it created and the resources keep costing money.
 - The Terraform state and the generated SSH key stay inside that Jenkins volume. They are not in the repository.
 - The Cohere key and Slack webhook are placeholders in SSM, so the summarize feature is not exercised.
