@@ -140,6 +140,78 @@ Four alert rules are in `monitoring/alert-rules.yml`: service down, high 5xx rat
 
 Written up in `FAILURE_AND_ROLLBACK.md`. I tested the automatic rollback by deploying a deliberately broken version: the health check failed, the previous version was restored, and the build ended red. The whole site was down for about 5 minutes 45 seconds during that test.
 
+## 8. Run the whole pipeline yourself on AWS (optional)
+
+My AWS environment was deleted after I submitted, so you can't open my live app. Instead, everything can be rebuilt from this repository with one Jenkins job. It runs on your own computer and creates everything in your own AWS account. Nothing of mine is involved.
+
+This lives on the `iac-pipeline` branch, so clone that branch:
+
+```bash
+git clone -b iac-pipeline https://github.com/bharathMoger18/TodoSummaryAssistant.git
+cd TodoSummaryAssistant
+```
+
+### What you need
+
+- Docker with Compose v2, and Git.
+- An AWS account and an IAM user that can create EC2, VPC, RDS, ECR, IAM roles and SSM parameters. I ran it with an administrator user and did not work out a smaller set of permissions.
+- About 25 minutes, and a small AWS bill (roughly 10 to 15 US cents per hour while it runs, so check your own pricing).
+
+### Steps
+
+1. Create the settings file and set two passwords of your choice (letters and digits only):
+   ```bash
+   cp .env.jenkins.example .env.jenkins
+   nano .env.jenkins
+   ```
+   `JENKINS_ADMIN_PASSWORD` is your Jenkins login. `GRAFANA_ADMIN_PASSWORD` is the Grafana admin login.
+2. Add your AWS credentials to the same file. If you have an AWS CLI profile:
+   ```bash
+   aws configure export-credentials --profile <your-profile> --format env-no-export >> .env.jenkins
+   ```
+   Otherwise add `AWS_ACCESS_KEY_ID=...` and `AWS_SECRET_ACCESS_KEY=...` lines by hand (and `AWS_SESSION_TOKEN=...` if yours are temporary). `.env.jenkins` is git-ignored, so it is never committed.
+3. Start Jenkins:
+   ```bash
+   docker compose -f docker-compose.jenkins.yml up -d --build
+   ```
+   The first build takes a few minutes. Then open http://localhost:8080 and log in as `admin`.
+4. Click the job **todo-iac**, then **Build Now**, and open the build's **Console Output**. It takes about 20 to 25 minutes.
+5. The last stage prints the address of the app and the address of Grafana.
+6. When you are finished, click **Build with Parameters**, set **ACTION** to `destroy`, and run it. This deletes everything the pipeline created.
+
+### What the pipeline does
+
+| Stage | What happens |
+|---|---|
+| Prepare | Checks your AWS login, finds your public IP and builds the Terraform settings |
+| Create AWS environment | `terraform apply` creates the VPC, security groups, two EC2 hosts, RDS, ECR, the IAM role and the SSM secrets (45 resources, see `aws/iac/`) |
+| Wait for hosts | Waits until both servers have finished installing Docker |
+| Backend tests | Runs the Maven tests against a temporary MySQL container |
+| Build images | Builds the backend and frontend images for linux/amd64 |
+| Push to ECR | Pushes both images tagged with the commit hash |
+| Deploy app | Copies `docker-compose.prod.yml` and `aws/deploy.sh` to the app host and runs the deploy, with its health check and automatic rollback |
+| Verify app | Calls `/healthz` and `/api/todos` through port 80 and checks that the running tag matches |
+| Start monitoring | Starts Prometheus, Grafana, node-exporter and cAdvisor on the second host and waits until every target reports up |
+| Summary | Prints the addresses |
+
+`Jenkinsfile.iac` is the pipeline. The original `Jenkinsfile` is the one I used on the first AWS environment, where Jenkins ran on an EC2 host.
+
+### Opening Grafana
+
+Grafana is only reachable from your own public IP, which the pipeline detects automatically. Dashboards open read-only without a login. For admin access, log in as `admin` with your `GRAFANA_ADMIN_PASSWORD`. To let someone else on another network see the dashboard, run **Build with Parameters** and enter their address in `GRAFANA_VIEWER_CIDRS` (for example `203.0.113.7/32`, several separated by commas). Opening Grafana to the whole internet is refused on purpose.
+
+### Things to know before you run it
+
+- **Jenkins reads the pipeline from GitHub, not from your local folder.** If you change files, push them to your own fork and set `REPO_URL` and `REPO_BRANCH` in `.env.jenkins`.
+- **Jenkins controls your Docker through its socket**, which gives it root-level access to your machine's Docker. Run it on a machine you are comfortable with.
+- **Port 80 of the app is open to the internet while it runs.** SSH and Grafana are limited to your IP.
+- **Always run `destroy` when you are done.** Left running, the environment costs a few dollars a day.
+- **Do not run `docker compose ... down -v`** or delete the `todo-jenkins_jenkins_home` volume while AWS resources exist. That volume holds the Terraform state, and without it Terraform forgets what it created and the resources keep costing money.
+- The Terraform state and the generated SSH key stay inside that Jenkins volume. They are not in the repository.
+- The Cohere key and Slack webhook are placeholders in SSM, so the summarize feature is not exercised.
+- Everything is plain HTTP. There is no TLS and no load balancer.
+- I have run this end to end on my own account. I have not tried it on any other account or operating system.
+
 ## Known limitations
 
 - **Grafana has no notification channel.** Alerts fire but nobody is notified.
