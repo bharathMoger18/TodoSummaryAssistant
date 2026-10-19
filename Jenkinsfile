@@ -57,7 +57,7 @@ pipeline {
                     set -euo pipefail
                     echo "Action: $ACTION, image tag: $IMAGE_TAG, your address: $OPERATOR_CIDR"
                     aws sts get-caller-identity --query Arn --output text
-                    terraform version | head -n 1
+                    terraform version | sed -n 1p
                     if [ "$ACTION" = "deploy" ] && [ "${SKIP_DEPLOY:-false}" != "true" ] && [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
                         echo "GRAFANA_ADMIN_PASSWORD is not set in .env.jenkins" >&2
                         exit 1
