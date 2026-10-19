@@ -76,7 +76,7 @@ def tfContainers() {
 }
 
 def tfPrelude() {
-    return '''set -euo pipefail
+    return '''set -eu
 apk add --no-cache bash jq > /dev/null
 cd "$WORKSPACE/aws/iac"
 jq -n --arg op "$OPERATOR_CIDR" --arg key "$WORKSPACE/todo-key.pem" --arg v "${GRAFANA_VIEWER_CIDRS:-}" \\
@@ -201,7 +201,7 @@ pipeline {
                         unstash 'src'
                         withAws {
                             container('terraform') {
-                                sh('#!/bin/bash\n' + tfPrelude() + '''
+                                sh('#!/bin/sh\n' + tfPrelude() + '''
 terraform apply -input=false -auto-approve -var-file="$WORKSPACE/pipeline.tfvars.json"
 terraform output -json > "$WORKSPACE/outputs.json"
 chown 1000:1000 "$WORKSPACE/outputs.json" "$WORKSPACE/todo-key.pem"
@@ -391,7 +391,7 @@ exit 1
                         unstash 'src'
                         withAws {
                             container('terraform') {
-                                sh('#!/bin/bash\n' + tfPrelude() + '''
+                                sh('#!/bin/sh\n' + tfPrelude() + '''
 terraform destroy -input=false -auto-approve -var-file="$WORKSPACE/pipeline.tfvars.json"
 ''')
                             }
