@@ -138,7 +138,7 @@ pipeline {
                         }
                     }
                     def pushed = currentBuild.getBuildCauses('hudson.triggers.SCMTrigger$SCMTriggerCause')
-                    env.SKIP_DEPLOY = (pushed && env.ENV_EXISTS != 'yes') ? 'true' : 'false'
+                    env.SKIP_DEPLOY = 'false'
                     echo "Action: ${env.ACTION}, image tag: ${env.IMAGE_TAG}, your address: ${env.OPERATOR_CIDR}, environment exists: ${env.ENV_EXISTS}"
                     if (env.SKIP_DEPLOY == 'true') {
                         echo 'Push detected, but no AWS environment exists. Run Build Now once to create it. Nothing deployed.'
