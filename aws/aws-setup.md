@@ -1,18 +1,30 @@
 # AWS Setup
 
-Region: `ap-south-1` (Mumbai). The diagram is in `aws/architecture-diagram.png`.
+Everything here is created by the Terraform in `aws/iac/`, run by the Jenkins pipeline. Region: `ap-south-1` (Mumbai). The diagram is in `aws/architecture-diagram.png`.
+
+## How it is created
+
+The pipeline's "Create AWS environment" stage runs `terraform init` and `terraform apply` (45 resources) using the operator's AWS credentials. The Terraform state, the generated SSH key and the saved outputs live in the Jenkins container's Docker volume, not in the repository. `ACTION = destroy` runs `terraform destroy` and removes everything.
+
+| File | What it creates |
+|---|---|
+| `network.tf` | VPC, internet gateway, two public subnets, two private subnets, route tables, the DB subnet group, three security groups and their rules |
+| `iam.tf` | The app host's IAM role, policy and instance profile |
+| `database.tf` | Two ECR repositories (with a lifecycle policy), the RDS instance, a generated database password and the SSM parameters |
+| `compute.tf` | An SSH key pair, and the two EC2 instances with their first-boot script |
+| `variables.tf`, `outputs.tf`, `providers.tf` | Inputs, outputs and the provider and state settings |
 
 ## Components
 
-| Component | Name | Details |
-|---|---|---|
-| App host | `todo-app` | EC2 t3.small. Runs the nginx frontend (port 80), the Spring Boot backend, node-exporter and cAdvisor with Docker Compose (`docker-compose.prod.yml`). |
-| Ops host | `todo-ops` | EC2 t3.medium. Runs Jenkins (port 8080), Prometheus (localhost only) and Grafana (port 3000), plus its own node-exporter and cAdvisor. |
-| Database | `todo-db` | RDS MySQL 8.4.7, `db.t3.micro`, single-AZ, **not publicly accessible**, storage encrypted, 3-day automated backups. |
-| Registry | `todo-backend`, `todo-frontend` | ECR repositories. Images are tagged with the 8-character commit SHA. |
-| Secrets | `/todo/*` | SSM Parameter Store: `db-host`, `db-username` (String); `db-password`, `cohere-api-key`, `slack-webhook-url` (SecureString). |
+| Component | Details |
+|---|---|
+| App host `todo-app` | EC2 t3.small, Ubuntu 24.04, public subnet. Runs the nginx frontend (port 80), the Spring Boot backend, node-exporter and cAdvisor with Docker Compose (`docker-compose.prod.yml`). |
+| Ops host `todo-ops` | EC2 t3.medium, Ubuntu 24.04, public subnet. Runs Prometheus (localhost only) and Grafana (port 3000), plus its own node-exporter and cAdvisor. |
+| Database `todo-db` | RDS MySQL 8.4, `db.t3.micro`, single-AZ, in private subnets, **not publicly accessible**, storage encrypted, 3-day automated backups. |
+| Registry | ECR repositories `todo-backend` and `todo-frontend`, immutable tags (the commit hash), scan on push, the 10 most recent images kept. |
+| Secrets | SSM Parameter Store under `/todo/`: `db-host` and `db-username` (String); `db-password`, `cohere-api-key` and `slack-webhook-url` (SecureString). |
 
-The two hosts are in different subnets (private IPs `10.0.1.x` for ops and `10.0.2.x` for app). Both have public IPs, because there is no NAT gateway or load balancer in this small setup.
+Both hosts have a 20 GB encrypted gp3 disk and require IMDSv2 (token-based metadata requests). On first boot, a script installs Docker, Docker Compose and the AWS CLI, and the pipeline waits for it to finish. The hosts are in public subnets with public IPs that change when an instance is replaced. There is no NAT gateway, load balancer or Elastic IP, to keep the footprint and cost small. The two RDS subnets are in different availability zones because RDS requires a subnet group that spans two, and they have no route to the internet.
 
 ## Security groups
 
@@ -21,8 +33,8 @@ The two hosts are in different subnets (private IPs `10.0.1.x` for ops and `10.0
 | Port | Source | Purpose |
 |---|---|---|
 | 80 | `0.0.0.0/0` | The public application. This is the only port open to the internet. |
-| 22 | my IP `/32`, and `todo-ops-sg` | SSH for me, and for Jenkins deploys. |
-| 8080, 9100, 8081 | `todo-ops-sg` only | Prometheus scrapes backend metrics, node-exporter and cAdvisor. |
+| 22 | the operator's IP `/32` | SSH, used by the pipeline to deploy |
+| 8080, 9100, 8081 | `todo-ops-sg` only | Prometheus scrapes backend metrics, node-exporter and cAdvisor |
 
 The metrics ports are also published on the host's private IP only (`METRICS_BIND_IP` in `docker-compose.prod.yml`), so they are not reachable on the public interface even if a rule were added by mistake.
 
@@ -30,57 +42,54 @@ The metrics ports are also published on the host's private IP only (`METRICS_BIN
 
 | Port | Source | Purpose |
 |---|---|---|
-| 22 | my IP `/32` | SSH |
-| 3000 | my IP `/32` | Grafana |
-| 8080 | my IP `/32` | Jenkins UI |
+| 22 | the operator's IP `/32` | SSH, used by the pipeline to start monitoring |
+| 3000 | the operator's IP `/32`, plus optional viewer IPs | Grafana |
 
-**RDS security group**
+The pipeline finds the operator's public IP itself on every run. Extra Grafana viewers are added with the `GRAFANA_VIEWER_CIDRS` parameter. `0.0.0.0/0` is refused by a validation in `variables.tf`.
+
+**`todo-rds-sg` (database)**
 
 | Port | Source |
 |---|---|
 | 3306 | `todo-app-sg` only (no CIDR rules) |
 
-Limitations: my IP changes when my network changes, and then I must update the three `/32` rules. Port 80 is plain HTTP with no TLS, and Grafana and Jenkins also use plain HTTP. A real setup would put a load balancer with a certificate in front, and use a VPN or SSM Session Manager instead of public SSH.
+Limitations: the operator's IP can change, and a new pipeline run then updates the rules. Everything uses plain HTTP, with no TLS. A real setup would put a load balancer with a certificate in front of the app and use SSM Session Manager instead of public SSH.
 
 ## IAM
 
-No AWS keys are stored on the hosts. Each host has an instance role.
+No AWS keys are stored on the hosts.
 
-**`todo-app-role`** (app host):
+**`todo-app-role`** (app host only):
 - `ecr:GetAuthorizationToken` on `*` (this action cannot be scoped to a resource).
 - Pull-only ECR actions (`BatchCheckLayerAvailability`, `BatchGetImage`, `GetDownloadUrlForLayer`) on the two repositories only.
 - `ssm:GetParameter`, `GetParameters` and `GetParametersByPath` on `parameter/todo/*` only.
 
-**`todo-ops-role`** (ops host, where Jenkins runs):
-- `ecr:GetAuthorizationToken` on `*`.
-- Push and read actions on the two repositories only (upload, `PutImage`, `DescribeImages`, `ListImages`, plus pull).
-- No SSM, EC2 or RDS permissions. Jenkins can push images but cannot read the database password.
+**The ops host has no instance role**, because Prometheus and Grafana never call AWS.
 
-Jenkins uses this role for ECR and uses an SSH credential (`app-ssh`) stored in Jenkins to deploy. I also use a separate IAM user profile from my laptop to run `aws/setup.sh` and the checks in this document.
+**The pipeline's own access** comes from the operator's AWS credentials in `.env.jenkins`. I ran it with an administrator user and did not work out a minimal permission set. That is the least-privilege gap in this setup.
 
 ## Secrets
 
-Real values are never in the repo. `aws/deploy.sh` reads the five `/todo/*` parameters with the instance role at deploy time and passes them to Compose as environment variables. `.env.example` lists the variable names with fake values.
+Real values are never in the repository.
+- The database password is generated by Terraform (`random_password`) and stored in SSM. It also exists in the Terraform state, which stays in the Jenkins volume.
+- `aws/deploy.sh` reads the five `/todo/*` parameters with the instance role at deploy time and passes them to Compose as environment variables.
+- The Cohere API key and Slack webhook URL are **placeholders**. The app starts and the to-do features work, but the "summarize and send to Slack" feature does not work with real services. Real values can be set later with `aws ssm put-parameter --overwrite`, and Terraform will not overwrite them.
+- The Grafana password comes from `.env.jenkins` and is sent to the ops host through standard input.
 
-**The Cohere API key and Slack webhook URL are placeholders.** The app starts and the to-do features work, but the "summarize and send to Slack" feature does not work with real services.
+## How a deploy reaches the hosts
 
-## How a deploy reaches the host
-
-1. Jenkins (on `todo-ops`) builds and tests, then pushes both images to ECR with the commit tag.
-2. Jenkins copies `docker-compose.prod.yml` and `aws/deploy.sh` to the app host over SSH and runs `deploy.sh <tag>`.
+1. The pipeline builds and tests, then pushes both images to ECR with the commit tag.
+2. It copies `docker-compose.prod.yml` and `aws/deploy.sh` to the app host over SSH and runs `deploy.sh <tag>`.
 3. `deploy.sh` logs in to ECR, fetches secrets from SSM, starts the stack, checks health and rolls back on failure (details in `FAILURE_AND_ROLLBACK.md`).
+4. The pipeline then copies `monitoring/` to the ops host and starts Prometheus and Grafana.
 
-## What is scripted and what is not
+## What is not covered
 
-- `aws/deploy.sh` is the deploy script run on the app host.
-- `aws/setup.sh` only contains the monitoring security-group rules. The rest of the infrastructure (EC2, RDS, ECR, IAM roles, SSM parameters, the other security groups) was created by hand through the AWS console and CLI, and there is no Terraform or CloudFormation. Rebuilding it needs this document, not a single command.
+- Multi-AZ, deletion protection and longer backup retention on RDS (kept off for cost, and `destroy` takes no final snapshot).
+- TLS, a domain name and a load balancer.
+- A minimal IAM policy for the person running the pipeline.
+- A root access key check and a budget alert on my own AWS account.
 
-## Not done
+## Cleanup
 
-- Root access key check and deactivation.
-- A monthly budget alert.
-- Multi-AZ, deletion protection and longer backup retention on RDS (kept off for cost).
-
-## Cleanup after review
-
-Stop both EC2 instances and the RDS instance. Delete them if they are no longer needed, because RDS and EC2 cost money while running.
+Run the pipeline with `ACTION = destroy`. It removes everything above. Check the AWS console afterwards for leftover instances, RDS databases and volumes.
