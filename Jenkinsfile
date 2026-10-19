@@ -101,7 +101,6 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
-    triggers { pollSCM('H/2 * * * *') }
 
     parameters {
         choice(name: 'ACTION', choices: ['deploy', 'destroy'],
