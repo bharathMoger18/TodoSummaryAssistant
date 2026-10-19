@@ -28,3 +28,5 @@ node_modules/
 .DS_Store
 .env.jenkins
 !.env.jenkins.example
+aws/bootstrap-state/.terraform/
+aws/bootstrap-state/terraform.tfstate*

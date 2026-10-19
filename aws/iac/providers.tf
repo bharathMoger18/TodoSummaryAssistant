@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.10"
 
   required_providers {
     aws    = { source = "hashicorp/aws", version = "~> 5.80" }
@@ -8,9 +8,8 @@ terraform {
     local  = { source = "hashicorp/local", version = "~> 2.5" }
   }
 
-  # State stays on local disk. The path is passed at init time
-  # (terraform init -backend-config="path=...") so Jenkins can keep it in its own volume.
-  backend "local" {}
+    # State lives in S3 so any pipeline pod can reach it. Bucket and key are passed at init time.
+  backend "s3" {}
 }
 
 provider "aws" {
