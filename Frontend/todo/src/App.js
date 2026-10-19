@@ -91,7 +91,7 @@ function App() {
 
   return (
     <div className="App">
-      <h1>Todo Summary Assistant</h1>
+      <h1>My Todo List</h1>
       <Notification message={notification.message} type={notification.type} />
       <TodoForm addTodo={addTodo} updateTodo={updateTodo} editingTodo={editingTodo} setEditingTodo={setEditingTodo} />
       <button onClick={summarizeAndSendToSlack} className="summary-button">
