@@ -3,6 +3,11 @@
 //   destroy -> Terraform deletes everything it created
 // AWS credentials, the Grafana password and the Jenkins settings come from .env.jenkins,
 // which Docker passes into this Jenkins container as environment variables.
+
+def shouldDeploy() {
+    return (params.ACTION ?: 'deploy') == 'deploy' && env.SKIP_DEPLOY != 'true'
+}
+
 pipeline {
     agent any
 
@@ -12,6 +17,8 @@ pipeline {
         timeout(time: 60, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '10'))
     }
+
+    triggers { pollSCM('H/2 * * * *') }
 
     parameters {
         choice(name: 'ACTION', choices: ['deploy', 'destroy'],
@@ -39,13 +46,19 @@ pipeline {
                     env.GRAFANA_VIEWER_CIDRS = params.GRAFANA_VIEWER_CIDRS ?: ''
                     env.IMAGE_TAG = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
                     env.OPERATOR_CIDR = sh(script: 'curl -fsS https://checkip.amazonaws.com', returnStdout: true).trim() + '/32'
+                    def pushed = currentBuild.getBuildCauses('hudson.triggers.SCMTrigger$SCMTriggerCause')
+                    def exists = fileExists("${env.STATE_DIR}/outputs.json")
+                    env.SKIP_DEPLOY = (pushed && !exists) ? 'true' : 'false'
+                    if (env.SKIP_DEPLOY == 'true') {
+                        echo 'Push detected, but no AWS environment exists. Run Build Now once to create it. Nothing deployed.'
+                    }
                 }
                 sh '''#!/bin/bash
                     set -euo pipefail
                     echo "Action: $ACTION, image tag: $IMAGE_TAG, your address: $OPERATOR_CIDR"
                     aws sts get-caller-identity --query Arn --output text
                     terraform version | head -n 1
-                    if [ "$ACTION" = "deploy" ] && [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
+                    if [ "$ACTION" = "deploy" ] && [ "${SKIP_DEPLOY:-false}" != "true" ] && [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
                         echo "GRAFANA_ADMIN_PASSWORD is not set in .env.jenkins" >&2
                         exit 1
                     fi
@@ -57,39 +70,8 @@ pipeline {
             }
         }
 
-        stage('Create AWS environment') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
-            steps {
-                sh '''#!/bin/bash
-                    set -euo pipefail
-                    cd aws/iac
-                    terraform init -input=false -backend-config="path=$STATE_DIR/terraform.tfstate"
-                    terraform apply -input=false -auto-approve -var-file="$STATE_DIR/pipeline.tfvars.json"
-                    terraform output -json > "$STATE_DIR/outputs.json"
-                '''
-            }
-        }
-
-        stage('Wait for hosts') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
-            steps {
-                sh '''#!/bin/bash
-                    set -euo pipefail
-                    for ip in $(jq -r '.app_public_ip.value, .ops_public_ip.value' "$STATE_DIR/outputs.json"); do
-                        ready=no
-                        for i in $(seq 1 30); do
-                            if ssh $SSH_OPTS ubuntu@"$ip" 'cloud-init status --wait' > /dev/null 2>&1; then ready=yes; break; fi
-                            sleep 10
-                        done
-                        [ "$ready" = "yes" ] || { echo "Host $ip did not finish booting" >&2; exit 1; }
-                        echo "Host $ip is ready"
-                    done
-                '''
-            }
-        }
-
         stage('Backend tests') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
+            when { expression { shouldDeploy() } }
             steps {
                 // The source is copied into the test container with "docker cp" instead of a bind mount,
                 // because this Jenkins runs inside a container and bind-mount paths would point at the host.
@@ -127,8 +109,39 @@ pipeline {
             }
         }
 
+        stage('Create AWS environment') {
+            when { expression { shouldDeploy() } }
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+                    cd aws/iac
+                    terraform init -input=false -backend-config="path=$STATE_DIR/terraform.tfstate"
+                    terraform apply -input=false -auto-approve -var-file="$STATE_DIR/pipeline.tfvars.json"
+                    terraform output -json > "$STATE_DIR/outputs.json"
+                '''
+            }
+        }
+
+        stage('Wait for hosts') {
+            when { expression { shouldDeploy() } }
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+                    for ip in $(jq -r '.app_public_ip.value, .ops_public_ip.value' "$STATE_DIR/outputs.json"); do
+                        ready=no
+                        for i in $(seq 1 30); do
+                            if ssh $SSH_OPTS ubuntu@"$ip" 'cloud-init status --wait' > /dev/null 2>&1; then ready=yes; break; fi
+                            sleep 10
+                        done
+                        [ "$ready" = "yes" ] || { echo "Host $ip did not finish booting" >&2; exit 1; }
+                        echo "Host $ip is ready"
+                    done
+                '''
+            }
+        }
+
         stage('Build images') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
+            when { expression { shouldDeploy() } }
             steps {
                 // --platform makes the images run on the AWS hosts even if this machine is ARM (Apple Silicon)
                 sh '''#!/bin/bash
@@ -141,7 +154,7 @@ pipeline {
         }
 
         stage('Push to ECR') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
+            when { expression { shouldDeploy() } }
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
@@ -161,7 +174,7 @@ pipeline {
         }
 
         stage('Deploy app') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
+            when { expression { shouldDeploy() } }
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
@@ -173,7 +186,7 @@ pipeline {
         }
 
         stage('Verify app') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
+            when { expression { shouldDeploy() } }
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
@@ -188,7 +201,7 @@ pipeline {
         }
 
         stage('Start monitoring') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
+            when { expression { shouldDeploy() } }
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
@@ -226,7 +239,7 @@ pipeline {
         }
 
         stage('Summary') {
-            when { expression { (params.ACTION ?: 'deploy') == 'deploy' } }
+            when { expression { shouldDeploy() } }
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail

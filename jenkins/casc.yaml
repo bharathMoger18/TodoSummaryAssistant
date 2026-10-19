@@ -17,6 +17,9 @@ jobs:
   - script: >
       pipelineJob('todo-iac') {
         description('Creates the AWS environment with Terraform, then builds, deploys and starts monitoring. Run it again with ACTION=destroy to delete everything.')
+        triggers {
+          scm('H/2 * * * *')
+        }
         definition {
           cpsScm {
             scm {
