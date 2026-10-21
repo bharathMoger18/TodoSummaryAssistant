@@ -4,11 +4,11 @@
 
 - **`todo-ops` host (t3.medium):** Prometheus, Grafana, and a node-exporter and cAdvisor for its own metrics. Nothing else runs there.
 - **`todo-app` host (t3.small):** the app containers plus their own node-exporter and cAdvisor.
-- **Jenkins** is not on AWS. It runs in a container on the operator's own machine, so its build logs are there too.
+- **Jenkins and its Kubernetes cluster are not on AWS.** Jenkins runs as a native service on the operator's own machine, and each pipeline stage runs as a short-lived pod on a kubeadm cluster (namespace `todo-ci`). The pod is deleted when its stage ends, so the build log in Jenkins is the record of what happened. Jenkins keeps the last 10 builds.
 - **Scraping:** Prometheus scrapes every 15 s. It has 6 targets: itself, the backend at `/actuator/prometheus` (Spring Boot Actuator + Micrometer), and node-exporter and cAdvisor on both hosts.
 - **Targets are generated, not committed.** The pipeline's "Start monitoring" stage fills `monitoring/targets/*.json.example` with the app host's private IP and copies the folder to the ops host. It then waits until all 6 targets report up, and fails the build if they do not.
 - **Access:** Prometheus listens on localhost only. Grafana (port 3000) accepts only the operator's IP, plus any viewer IPs given to the pipeline. The metrics ports on the app host (8080, 9100, 8081) accept connections only from the ops security group, and are also published on the host's private IP only.
-- **Grafana login:** dashboards open read-only without a login, because the pipeline turns on anonymous Viewer access (the address allow-list is what protects it). Admin access needs the password from `.env.jenkins`.
+- **Grafana login:** dashboards open read-only without a login, because the pipeline turns on anonymous Viewer access (the address allow-list is what protects it). Admin access needs the password stored in the Jenkins credential `grafana-admin-password`.
 
 ## Which metrics I monitor and why
 
@@ -25,7 +25,7 @@ The Grafana dashboard (`monitoring/grafana-dashboard.json`, provisioned from `mo
 
 - **Backend container log:** stack traces, database connection errors, failed startups. This is where I look first after a failed deploy. `deploy.sh` also prints the last 40 backend lines when a health check fails.
 - **nginx (frontend) container log:** 502 and 504 errors mean nginx cannot reach the backend.
-- **Jenkins build log** (on the operator's machine): shows which stage failed, what Terraform changed and whether a rollback ran.
+- **Jenkins build log** (on the operator's machine): shows which stage failed, what Terraform changed and whether a rollback ran. Each stage's output is in the console log, because its pod no longer exists afterwards.
 - **First-boot log on each host** (`/var/log/cloud-init-output.log`): shows why a host did not finish installing Docker.
 - **RDS logs:** connection and authentication errors in the RDS console.
 - **Retention:** Docker keeps container logs on each host with rotation (10 MB x 3 files per container). Logs are **not** centralized, so they are lost when a host is replaced. A real setup would ship them to CloudWatch Logs or Loki.
@@ -61,6 +61,7 @@ Alerts are Prometheus rules in `monitoring/alert-rules.yml`:
 
 - **Grafana has no notification channel** (no email, Slack or PagerDuty). Alerts fire and are visible, but nobody is notified. This is the biggest gap. I would add a contact point and a notification policy first.
 - **No external uptime check.** If `todo-ops` goes down, nothing monitors the app, and nothing alerts that monitoring is gone. A probe from outside AWS would fix that.
+- **Jenkins and the Kubernetes cluster are not monitored.** Prometheus only watches the two AWS hosts and the app. If Jenkins or the cluster is down, nothing alerts, and the next deploy simply fails.
 - **No RDS metrics** (CPU, connections, free storage). I would scrape CloudWatch or add an exporter.
 - **No memory alert.** Memory is on the dashboard only.
 - **No alert on the alert pipeline itself.** If Prometheus stops evaluating rules, nothing says so.

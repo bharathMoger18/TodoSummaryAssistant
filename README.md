@@ -1,6 +1,6 @@
 # Todo Summary Assistant: DevOps Assessment
 
-A full-stack to-do application (Spring Boot backend, React frontend, MySQL) that can summarize pending tasks with Cohere and post the summary to Slack. This repository is the original project plus my DevOps work: Docker images, a Jenkins pipeline that builds the whole AWS environment with Terraform, deploys the app to EC2 with an RDS database, and starts Prometheus and Grafana for monitoring.
+A full-stack to-do application (Spring Boot backend, React frontend, MySQL) that can summarize pending tasks with Cohere and post the summary to Slack. This repository is the original project plus my DevOps work: Docker images, a Jenkins pipeline whose stages run as short-lived pods on a Kubernetes cluster, Terraform that builds the whole AWS environment, deployment of the app to EC2 with an RDS database, and Prometheus and Grafana for monitoring. A push to `main` starts the whole pipeline with no manual step.
 
 The application features are unchanged. Everything below is about building, running, deploying and operating it.
 
@@ -10,6 +10,8 @@ The application features are unchanged. Everything below is about building, runn
 |---|---|
 | `aws/aws-setup.md`, `aws/architecture-diagram.png` | The AWS layout: networking, security groups, IAM, secrets |
 | `aws/iac/` | The Terraform that creates all of it |
+| `aws/bootstrap-state/` | One-time Terraform that creates the S3 bucket for the main Terraform state |
+| `k8s/todo-ci.yaml` | The Kubernetes namespace, service account, RBAC and quota used by the pipeline pods |
 | `Jenkinsfile` | The pipeline |
 | `FAILURE_AND_ROLLBACK.md` | The six failure scenarios, with what I tested and what I did not |
 | `MONITORING_AND_OPERATIONS.md` | Metrics, logs, alerts, early detection |
@@ -20,21 +22,22 @@ The application features are unchanged. Everything below is about building, runn
 ```
 Backend/todo-summary-assistant/   Spring Boot + Maven app, Dockerfile, .dockerignore
 Frontend/todo/                    React app, Dockerfile, .dockerignore, nginx.conf.template
-Jenkinsfile                       the pipeline: create the AWS environment, deploy, monitor (or destroy)
-jenkins/                          Dockerfile and configuration for the Jenkins container
-docker-compose.jenkins.yml        starts Jenkins on your own machine
-.env.jenkins.example              settings for Jenkins (copy to .env.jenkins, which is git-ignored)
+Jenkinsfile                       the pipeline: every stage runs in its own Kubernetes pod
+k8s/todo-ci.yaml                  namespace, service account, Role, RoleBinding, token Secret, ResourceQuota
 docker-compose.yml                local run: MySQL + backend + frontend
 docker-compose.prod.yml           production stack on the app host (no MySQL, RDS is used)
 aws/iac/                          Terraform for the whole AWS environment
+aws/bootstrap-state/              one-time Terraform for the S3 state bucket
 aws/deploy.sh                     runs on the app host: pull, start, health check, rollback
 aws/aws-setup.md                  explanation of the AWS setup
 aws/architecture-diagram.png      architecture diagram
 monitoring/                       Prometheus, alert rules, Grafana, compose file for the monitoring host
 .env.example                      environment variables for the local run
+jenkins/, docker-compose.jenkins.yml, .env.jenkins.example
+                                  legacy: the earlier Docker-based Jenkins setup, no longer used by the pipeline
 ```
 
-The task suggests a `Jenkinsfile` in the root, which is what I used. `jenkins/`, `docker-compose.jenkins.yml`, `aws/iac/`, `aws/deploy.sh` and `docker-compose.prod.yml` are extra files beyond the suggested layout.
+The task suggests a `Jenkinsfile` in the root, which is what I used. `k8s/`, `aws/bootstrap-state/`, `aws/iac/`, `aws/deploy.sh` and `docker-compose.prod.yml` are extra files beyond the suggested layout. The earlier version of this project (Jenkins in a Docker container, a manual trigger) is preserved under the Git tag `submission-final`.
 
 ## 1. Run locally
 
@@ -63,7 +66,8 @@ Open http://localhost:3000. The first start takes a few minutes while images bui
 | `BACKEND_HOST`, `BACKEND_PORT`, `DNS_RESOLVER` | frontend (nginx) | Where nginx proxies `/api` |
 | `DB_HOST`, `DB_USERNAME`, `DB_PASSWORD` | production compose | RDS endpoint and credentials, filled from SSM by `deploy.sh` |
 | `ECR_REGISTRY`, `IMAGE_TAG`, `METRICS_BIND_IP` | production compose | Registry, image tag, and the host's private IP for the metrics ports |
-| `JENKINS_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`, `REPO_URL`, `REPO_BRANCH` | Jenkins container | See `.env.jenkins.example` |
+
+The Jenkins settings (AWS credentials, Grafana password, cluster token) are not environment variables. They are stored in the Jenkins credential store (see section 4).
 
 ### Assumptions
 
@@ -95,103 +99,111 @@ No business logic was changed. The changes are:
 - `nginx.conf.template` proxies `/api` to `BACKEND_HOST:BACKEND_PORT` and serves `/healthz`, so the same image works locally and on EC2 without a rebuild.
 - `HEALTHCHECK` calls `/healthz`.
 
-Both services have a `.dockerignore`. All configuration comes from environment variables, and no secrets are baked into images. The pipeline builds both images for `linux/amd64`, so they also run on the AWS hosts when the pipeline is started from an ARM machine such as an Apple Silicon Mac.
+Both services have a `.dockerignore`. All configuration comes from environment variables, and no secrets are baked into images. In the pipeline the images are built by Kaniko inside a cluster pod. The cluster nodes are `linux/amd64`, the same architecture as the AWS hosts, so no cross-platform flag is needed.
 
 ## 4. CI/CD pipeline (`Jenkinsfile`)
 
-The pipeline runs in Jenkins inside a container on **your own machine** (`docker-compose.jenkins.yml`). It uses your machine's Docker through the mounted socket, Terraform and the AWS CLI inside the container, and your AWS credentials from `.env.jenkins`. One run takes about 20 to 25 minutes. It has two actions: `deploy` (the default) and `destroy`.
+### How it is wired
 
-Here is what each stage does and why it is there.
+- **Controller.** Jenkins runs as a native service on **my own machine** (port 8081). It reads the `Jenkinsfile` from GitHub (job type: Pipeline script from SCM).
+- **Agents.** The Jenkins Kubernetes plugin creates one **short-lived pod per stage** on a kubeadm cluster, in the namespace `todo-ci`, and deletes it when the stage ends. Each pod has a `jnlp` agent container (JDK 21) that connects back to Jenkins over WebSocket, plus the tool containers that stage needs.
+- **Least privilege.** Jenkins uses a service account (`jenkins-ci`) whose Role only allows pod operations inside `todo-ci`. A ResourceQuota caps pods and memory there (`k8s/todo-ci.yaml`).
+- **Passing files between pods.** Pods share nothing, so the source code, the Terraform outputs and the SSH key move between stages with `stash` and `unstash`. Build-wide values such as the image tag are Jenkins environment variables.
+- **Terraform state.** It lives in an encrypted, versioned S3 bucket with S3 native locking (`use_lockfile`), not in a pod. The bucket is created once by `aws/bootstrap-state/`.
+- **Trigger.** A push to `main` sends a GitHub webhook to Jenkins through a Cloudflare tunnel, and the build starts by itself. There is no manual approval gate anywhere.
+- **Time.** A full run took about 47 minutes (RDS creation and the first image builds are the longest parts). A destroy took about 7 minutes.
+
+The pipeline has two actions: `deploy` (the default) and `destroy`.
+
+### Stages and why each one is there
 
 **1. Prepare**
-Takes the first 8 characters of the commit hash as the image tag, so any running container can be traced to an exact commit. Finds your public IP (used later to restrict SSH and Grafana to you), checks that your AWS credentials work and Terraform is installed, and stops right away if `GRAFANA_ADMIN_PASSWORD` is missing. It writes the Terraform settings to a file in the Jenkins volume.
+Pod with an Alpine tools container. Clones the repository, takes the first 8 characters of the commit hash as the image tag (so any running container can be traced to an exact commit), stashes the source, confirms the AWS credentials work, finds the public IP the pod reaches the internet from (used later to restrict SSH and Grafana to that address), and checks whether an environment already exists in the S3 state. The result is only written to the log; nothing in the pipeline acts on it.
 
-**2. Create AWS environment** (`deploy` only)
-Runs `terraform init` and `terraform apply` in `aws/iac/`. This creates everything: the VPC and subnets, security groups, IAM role, ECR repositories, the RDS database, the SSM secrets, an SSH key pair and both EC2 hosts (45 resources). The Terraform state lives in the Jenkins volume, outside the repository, and the outputs (addresses, registry) are saved for the later stages.
+**2. Backend tests**
+Pod with three containers: the agent, Maven (`maven:3.9.9-eclipse-temurin-17`) and a MySQL 8.4 sidecar. Containers in a pod share a network, so the tests reach the database on `127.0.0.1:3306`. A loop waits until port 3306 is open before Maven starts. The Cohere key and Slack URL are dummy values because the tests never call those services. The only test in the project is a Spring context test, which starts the whole app and connects to MySQL. It is a smoke test, not full coverage. There are no frontend tests, so none run. Tests run first, so a broken commit fails before anything is created in AWS.
 
-**3. Wait for hosts**
+**3. Create AWS environment** (`deploy` only)
+Terraform pod (`hashicorp/terraform:1.10`). Runs `terraform init` with the S3 backend settings passed as flags, then `terraform apply -auto-approve`. This creates everything: the VPC and subnets, security groups, IAM role, ECR repositories, the RDS database, the SSM secrets, an SSH key pair and both EC2 hosts (45 resources). The outputs (addresses, registry) and the generated SSH key are stashed for the later stages.
+
+**4. Wait for hosts**
 Each host installs Docker, Compose and the AWS CLI on first boot. This stage waits (up to 5 minutes per host) until the boot script has finished, so the deploy does not start on a half-ready server.
 
-**4. Backend tests**
-Starts a throwaway MySQL 8.4 container on its own Docker network with a random password made for that run, then runs `mvn test` in a Maven container against it. The source is copied in with `docker cp` rather than a bind mount, because this Jenkins runs in a container and bind-mount paths would point at the host. The Cohere key and Slack URL are dummy values because the tests never call those services. A cleanup step removes the containers and network even if the tests fail. The only test in the project is a Spring context test, which starts the whole app and connects to MySQL. It is a smoke test, not full coverage. There are no frontend tests, so none run.
+**5. Build and push images**
+Pod with Kaniko and an AWS CLI helper container. The helper fetches a short-lived ECR login token into a shared volume. Kaniko then builds the backend and frontend images from their Dockerfiles and pushes them tagged with the commit hash. No Docker daemon or privileged container is needed. Before building, it checks whether that tag already exists, and tags are immutable in ECR, so an image that was already pushed for the same commit is skipped instead of failing.
 
-**5. Build images**
-Builds the backend and frontend images from their Dockerfiles for `linux/amd64`, tagged with the commit hash. `--pull` refreshes the base images. The backend build skips tests because the previous stage already ran them. If a build fails, nothing is pushed.
-
-**6. Push to ECR**
-Logs in to ECR with a short-lived token, using a temporary Docker config folder that is deleted afterwards. Before pushing, it checks whether that tag already exists. Tags are immutable in my ECR setup, so an image that was already pushed for the same commit is skipped instead of failing.
-
-**7. Deploy app**
+**6. Deploy app**
 Copies `docker-compose.prod.yml` and `aws/deploy.sh` to the app host over SSH and runs `deploy.sh <tag>`. That script logs in to ECR, reads the database details and API keys from SSM Parameter Store using the host's instance role, pulls the new images and starts them with Docker Compose. It then waits up to 200 seconds for both containers to be healthy and for `/api/todos` to answer through nginx. If that works, it records the tag. If it does not, it prints the last backend log lines, starts the previous tag again and exits with an error, so the build ends red.
 
-**8. Verify app**
-Checks from Jenkins, through port 80 like a real user: `/healthz` (retried a few times), `/api/todos`, and that the tag recorded on the host equals the tag that was just built.
+**7. Verify app**
+Checks from a pod, through port 80 like a real user: `/healthz` (retried a few times), `/api/todos`, and that the tag recorded on the host equals the tag that was just built.
 
-**9. Start monitoring**
-Generates the Prometheus target files from the `.example` files with the app host's private IP, copies the `monitoring/` folder to the second host, and starts Prometheus, Grafana, node-exporter and cAdvisor with Docker Compose. The Grafana password is sent through standard input so it never appears in a command line or log. The stage then waits until all 6 Prometheus targets report up, and fails if they do not.
-
-**10. Summary**
-Prints the app and Grafana addresses.
+**8. Start monitoring**
+Generates the Prometheus target files from the `.example` files with the app host's private IP, copies the `monitoring/` folder to the second host, and starts Prometheus, Grafana, node-exporter and cAdvisor with Docker Compose. The Grafana password is sent through standard input so it never appears in a command line or log. The stage then waits until all 6 Prometheus targets report up, fails if they do not, and prints the app and Grafana addresses.
 
 **Destroy AWS environment** (`destroy` only)
-Runs `terraform destroy`, which deletes everything the pipeline created.
+Terraform pod. Runs `terraform destroy` against the same S3 state, which deletes everything the pipeline created. It is manual on purpose, so nothing deletes the infrastructure by accident.
 
 **Failing fast and safety settings**
-Every shell step uses `set -e` and `pipefail`, so a failing command stops its stage and later stages never run. Only one build runs at a time, a build is cancelled after 60 minutes, and Jenkins keeps the last 10 builds.
+Every shell step uses `set -e`, so a failing command stops its stage and later stages never run. Only one build runs at a time, a build is cancelled after 90 minutes, and Jenkins keeps the last 10 builds.
 
-**Secrets**
-No secrets are in the repository. The database password is generated by Terraform and goes straight into SSM. The Cohere key and Slack URL in SSM are placeholders. Your AWS credentials and the two passwords are in `.env.jenkins`, which is git-ignored and handed to the Jenkins container as environment variables. They are not in Jenkins' own credential store, which I note as a difference from the task's wording.
+### Secrets
 
-**Trigger**
-A run is started by hand (Build Now, or Build with Parameters for `destroy`). I did not add a push trigger to this pipeline. Each run creates paid AWS resources, and because Jenkins runs on your own machine, GitHub cannot send it webhooks. The first, hand-built environment used a polling trigger, but that pipeline is not part of this version (see the `submission-final` tag).
+No secrets are in the repository. The database password is generated by Terraform and goes straight into SSM. The Cohere key and Slack URL in SSM are placeholders. The credentials Jenkins needs are in the **Jenkins credential store**, and `withCredentials` exposes them only inside the step that needs them, masked in the log:
+
+| Credential ID | Kind | Used for |
+|---|---|---|
+| `aws-creds` | Username with password (access key ID / secret key) | Terraform, S3 state, ECR, tag checks |
+| `grafana-admin-password` | Secret text | The Grafana admin password |
+| `todo-ci-token` | Secret text | Jenkins signing in to the Kubernetes API |
+
+### Trigger
+
+The job is started by a **GitHub webhook**. Jenkins runs on my own machine, so GitHub cannot reach it directly. A Cloudflare quick tunnel (`cloudflared tunnel --url http://localhost:8081`) gives Jenkins a public HTTPS address, and the webhook points at `<tunnel address>/github-webhook/`. A quick-tunnel address changes whenever the tunnel restarts, so the webhook URL must be updated after a restart. There is no first-run guard: a push to an empty AWS account creates the whole environment, and costs money. Disable the Jenkins job between demos.
 
 ## 5. AWS deployment
 
 Everything on AWS is created by the Terraform in `aws/iac/`. Details are in `aws/aws-setup.md` and `aws/architecture-diagram.png`. In short:
 
 - `todo-app` (EC2 t3.small) runs the app containers, `todo-ops` (EC2 t3.medium) runs Prometheus and Grafana, and `todo-db` is an RDS MySQL 8.4 instance in private subnets.
-- Only port 80 of the app is open to the internet. SSH and Grafana accept only your IP. RDS accepts connections only from the app security group and is not publicly accessible.
+- Only port 80 of the app is open to the internet. SSH and Grafana accept only the operator IP found by the Prepare stage (the address the pipeline pod reaches the internet from). RDS accepts connections only from the app security group and is not publicly accessible.
 - The app host has an IAM role instead of access keys, limited to pulling from the two ECR repositories and reading `/todo/*` in SSM. The monitoring host has no role.
 - The database password is generated by Terraform and stored in SSM Parameter Store.
+- Terraform state is in an S3 bucket (versioned, encrypted, public access blocked), created once by `aws/bootstrap-state/`.
 
-## 6. Run the whole thing on AWS yourself
+## 6. Run the whole thing yourself
 
-My AWS environment is deleted, so there is no live app to open. Instead, everything can be rebuilt from this repository in your own AWS account.
+My AWS environment is deleted, so there is no live app to open. Everything can be rebuilt from this repository in your own AWS account.
 
-```bash
-git clone https://github.com/bharathMoger18/TodoSummaryAssistant.git
-cd TodoSummaryAssistant
-```
+**What you need:** a machine for Jenkins (Linux, Java 21), a Kubernetes cluster (I used kubeadm 1.30) that Jenkins can reach on port 6443 and whose pods can reach Jenkins, Terraform 1.10 or newer on your machine for the one-time bucket step, and an AWS account with an IAM user that can create EC2, VPC, RDS, ECR, IAM roles, SSM parameters and S3 buckets (I used an administrator user and did not work out a smaller set of permissions). A run takes about 50 minutes and costs roughly ₹10 to ₹15 per hour while the environment exists, so check your own pricing.
 
-**What you need:** Docker with Compose v2, Git, and an AWS account with an IAM user that can create EC2, VPC, RDS, ECR, IAM roles and SSM parameters (I used an administrator user and did not work out a smaller set of permissions). It takes about 25 minutes and costs roughly ₹10 to ₹15 per hour, or 10 to 15 US cents, while it runs, so check your own pricing.
-
-1. Create the settings file and set two passwords of your choice (letters and digits only):
+1. **Create the state bucket (once).**
    ```bash
-   cp .env.jenkins.example .env.jenkins
-   nano .env.jenkins
+   cd aws/bootstrap-state
+   terraform init && terraform apply
    ```
-2. Add your AWS credentials to the same file. With an AWS CLI profile:
+   Put the `bucket_name` output into `TF_STATE_BUCKET` in the `Jenkinsfile`.
+2. **Prepare the cluster.**
    ```bash
-   aws configure export-credentials --profile <your-profile> --format env-no-export >> .env.jenkins
+   kubectl apply -f k8s/todo-ci.yaml
+   kubectl -n todo-ci get secret jenkins-ci-token -o jsonpath='{.data.token}' | base64 -d
+   kubectl -n todo-ci get secret jenkins-ci-token -o jsonpath='{.data.ca\.crt}' | base64 -d
    ```
-   Otherwise add `AWS_ACCESS_KEY_ID=...` and `AWS_SECRET_ACCESS_KEY=...` lines by hand (plus `AWS_SESSION_TOKEN=...` for temporary credentials).
-3. Start Jenkins:
-   ```bash
-   docker compose -f docker-compose.jenkins.yml up -d --build
-   ```
-   Then open http://localhost:8080 and log in as `admin` with your `JENKINS_ADMIN_PASSWORD`.
-4. Click the job **todo-iac**, then **Build Now**, and open the **Console Output**. Wait about 20 to 25 minutes.
-5. The last stage prints the app address and the Grafana address.
-6. When you are finished, click **Build with Parameters**, set **ACTION** to `destroy`, and run it.
+3. **Configure Jenkins.** Install the Kubernetes plugin. Add the three credentials from the table above. Under Manage Jenkins, Clouds, add a Kubernetes cloud named `k8s-todo-ci` with the API server URL, the CA certificate, namespace `todo-ci`, the `todo-ci-token` credential, the Jenkins URL that pods can reach (for example `http://<jenkins-host-ip>:8081`), and WebSocket ticked.
+4. **Create the job.** A Pipeline job with Definition Pipeline script from SCM, your repository URL, branch `*/main`, script path `Jenkinsfile`, and the trigger GitHub hook trigger for GITScm polling.
+5. **Add the webhook.** In GitHub, Settings, Webhooks, add the public address of Jenkins plus `/github-webhook/` (content type `application/json`, push events).
+6. **Run it.** Push a commit to `main`, or click Build Now. The last stage prints the app and Grafana addresses.
+7. **Clean up.** Click **Build with Parameters**, set **ACTION** to `destroy`, and run it.
 
-**Opening Grafana.** Grafana is reachable only from your own public IP, which the pipeline detects. Dashboards open read-only without a login. For admin access, log in as `admin` with your `GRAFANA_ADMIN_PASSWORD`. To let someone on another network see the dashboard, run **Build with Parameters** and enter their address in `GRAFANA_VIEWER_CIDRS` (for example `203.0.113.7/32`, several separated by commas). Opening Grafana to the whole internet is refused on purpose.
+**Opening Grafana.** Grafana is reachable only from your own public IP, which the pipeline detects. Dashboards open read-only without a login. For admin access, log in as `admin` with your Grafana password. To let someone on another network see the dashboard, run **Build with Parameters** and enter their address in `GRAFANA_VIEWER_CIDRS` (for example `203.0.113.7/32`, several separated by commas). Opening Grafana to the whole internet is refused on purpose.
 
 **Things to know before you run it**
-- Jenkins reads the pipeline from GitHub, not from your local folder. If you change files, push them to your own fork and set `REPO_URL` and `REPO_BRANCH` in `.env.jenkins`.
-- Jenkins controls your Docker through its socket, which gives it root-level access to your machine's Docker. Run it on a machine you are comfortable with.
-- Port 80 of the app is open to the internet while it runs. SSH and Grafana are limited to your IP.
+- Jenkins reads the pipeline from GitHub, not from your local folder. If you change files, push them to your own fork.
+- The agent container must use the same Java version as the controller or newer (the pipeline uses the JDK 21 agent image).
+- Jenkins does not know the build parameters until the job has run once, so Build with Parameters appears after the first run.
+- Port 80 of the app is open to the internet while it runs. SSH and Grafana are limited to the operator IP found by the Prepare stage (the address the pipeline pod reaches the internet from).
 - Always run `destroy` when you are done. Left running, the environment costs a few hundred rupees a day (a few US dollars).
-- Do not run `docker compose ... down -v` or delete the `todo-jenkins_jenkins_home` volume while AWS resources exist. That volume holds the Terraform state and the generated SSH key. Without it Terraform forgets what it created and the resources keep costing money.
+- Do not delete the S3 state bucket while AWS resources exist. It holds the Terraform state and the generated SSH key. Without it Terraform forgets what it created and the resources keep costing money.
 
 ## 7. Monitoring
 
@@ -207,27 +219,31 @@ Written up in `FAILURE_AND_ROLLBACK.md`. In short: `deploy.sh` rolls back to the
 
 | What | Where | Result |
 |---|---|---|
-| A full pipeline run, all stages | Terraform-built environment | Passed: tests, images pushed, app deployed and verified, all Prometheus targets up |
+| A full pipeline run, all stages in Kubernetes pods | Terraform-built environment | Passed in about 47 minutes: tests, images pushed, app deployed and verified, all 6 Prometheus targets up |
+| The trigger | Pipeline job | A push to `main` started the build by itself through the webhook ("Started by GitHub push") |
+| `ACTION = destroy` | Same environment | Passed: 44 resources destroyed in about 7 minutes, AWS left empty. The apply created 45; the one not reported as destroyed is `local_sensitive_file.ssh_key`, a local copy of the SSH key and not an AWS resource. I did not establish why Terraform did not list it |
 | A deliberately broken deploy (backend moved to the wrong port) | First environment, built by hand, with the same `deploy.sh` | Health check failed, rollback to the previous tag, build ended red. The whole site was down for about 5 min 45 s. |
 | `kill -9` on the backend | First environment | Docker restarted it in the same second, no alert fired (the outage was shorter than the alert's 2 minutes) |
 | Stopping the app to test the alert | First environment, same alert rules | Pending 26 s after the app stopped, firing after 2 min 26 s, and it cleared once the app was started again |
-| Dashboards | First environment | Every panel showed data |
+| Dashboards | Terraform-built environment | Every panel showed data |
 
-**Not tested:** running the pipeline a second time on the same commit, replacing an instance with Terraform, rotating the secrets, restoring RDS from a backup, and running the pipeline on another AWS account or operating system. The rollback, crash and alert tests were done on the first environment, which used the same `deploy.sh`, compose files and monitoring configuration as the current pipeline, but they were not repeated on the Terraform-built one.
-
-The first version of this project (the hand-built environment, with Jenkins on an EC2 instance) is preserved under the Git tag `submission-final`.
+**Not tested:** a second push while the environment already exists (an update of a running deployment through the new pipeline), a pipeline that fails halfway and is re-run, replacing an instance with Terraform, rotating the secrets, restoring RDS from a backup, and running the pipeline on another AWS account or cluster. The rollback, crash and alert tests were done on the first environment, which used the same `deploy.sh`, compose files and monitoring configuration as the current pipeline, but they were not repeated on the Terraform-built one.
 
 ## Known limitations
 
 - **Grafana has no notification channel.** Alerts fire and are visible, but nobody is notified.
 - **The Cohere key and Slack webhook are placeholders**, so the summary feature was not tested with real services.
-- **The pipeline is started by hand**, not by a push (see section 4).
+- **The webhook trigger depends on a quick tunnel.** Its address changes on restart, the webhook has no shared secret, and the tunnel exposes the Jenkins address publicly, so Jenkins login must stay enabled. A named tunnel and a webhook secret would fix this.
+- **No first-run guard.** A push to an empty AWS account builds and bills for everything. Disable the job between demos.
+- **No approval step before `terraform apply`**, by design for this task.
 - **HTTP only.** There is no TLS, no domain and no load balancer. The EC2 hosts have changing public IPs.
 - **RDS is single-AZ** with 3-day backups, no deletion protection and no final snapshot on destroy, to keep cost low.
-- **AWS credentials come from `.env.jenkins`**, not from Jenkins' credential store, and the Docker socket is shared with Jenkins.
+- **AWS credentials are long-lived keys** in the Jenkins credential store. The SSH private key also lives in the Terraform state and in Jenkins' stash. A production setup would use short-lived credentials and no SSH.
+- **No build cache.** Every run downloads dependencies again, so the image build stage takes about 19 minutes.
+- **The cluster nodes are small.** Memory is tight, so pod resource limits are set carefully.
 - **The existing React dependencies report 106 vulnerabilities** (4 critical) in `npm ci`. I did not change the application's dependencies.
 - I did not check the root access key of my AWS account or set a budget alert there.
 
 ## Cleaning up
 
-Run the pipeline with `ACTION = destroy` when you are finished, and confirm in the AWS console that no instances, RDS databases or volumes remain.
+Run the pipeline with `ACTION = destroy` when you are finished, and confirm in the AWS console that no instances, RDS databases or volumes remain. The S3 state bucket costs almost nothing and can be deleted last.
